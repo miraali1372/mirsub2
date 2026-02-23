@@ -1,36 +1,32 @@
-name: Update Subscription (Top 100 TCP)
+name: Real Test Sub
 
 on:
-  schedule:
-    - cron: '0 */4 * * *'
   workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
 
 jobs:
-  test:
+  run-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10 # زمان کل به ۱۰ دقیقه محدود شد
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       
-      - name: Fetch
+      - name: Get Raw
         run: |
           curl -L -o raw.txt "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt"
-          grep "^vless://" raw.txt | sort | uniq > unique.txt
+          grep "^vless://" raw.txt | head -n 100 > unique.txt
 
-      - name: Deps
+      - name: Install PyDeps
+        run: pip install requests
+
+      - name: Execute Python Test
+        run: python3 test_configs_final.py unique.txt subscription.txt
+
+      - name: Commit
         run: |
-          sudo apt-get update && sudo apt-get install -y unzip
-          pip install requests geoip2
-
-      - name: Run Speed Test
-        run: python3 test_configs_final.py unique.txt subscription.txt 4000
-
-      - name: Push
-        run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "action@github.com"
+          git config --global user.name "mirsub-bot"
+          git config --global user.email "bot@mirsub.com"
+          touch subscription.txt # مطمئن شدن از وجود فایل
           git add subscription.txt
-          git commit -m "Update: Top 100 TCP with Flag" || exit 0
+          git commit -m "Update subscription" || exit 0
           git push
