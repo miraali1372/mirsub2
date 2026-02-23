@@ -1,0 +1,122 @@
+name: Update Subscription
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+
+env:
+  NUM_RUNNERS: 4
+  THRESHOLD_MS: 150   # مقدار آستانه پینگ (قابل تغییر)
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Fetch Raw Configs
+        run: |
+          curl -L -o raw.txt "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt"
+          echo "✅ Total configs fetched: $(wc -l < raw.txt)"
+
+      - name: Initial Clean
+        run: |
+          grep -v "^#" raw.txt | grep -v "^$" | sort | uniq > unique_raw.txt
+          echo "✅ Initial unique count: $(wc -l < unique_raw.txt)"
+
+      - name: Split configs into chunks
+        id: split
+        run: |
+          total_lines=$(wc -l < unique_raw.txt)
+          chunk_size=$(( ($total_lines + $NUM_RUNNERS - 1) / $NUM_RUNNERS ))
+          matrix_json="{\"runner\":["
+          for i in $(seq 1 $NUM_RUNNERS); do
+            matrix_json+="\"$i\""
+            [ $i -lt $NUM_RUNNERS ] && matrix_json+=","
+          done
+          matrix_json+="]}"
+          echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
+          mkdir -p share
+          cp unique_raw.txt share/unique.txt
+
+      - name: Upload unique.txt
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-unique
+          path: share/
+
+  test:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download unique.txt
+        uses: actions/download-artifact@v4
+        with:
+          name: shared-unique
+          path: ./
+
+      - name: Get my chunk
+        run: |
+          total_lines=$(wc -l < unique.txt)
+          chunk_size=$(( ($total_lines + $NUM_RUNNERS - 1) / $NUM_RUNNERS ))
+          start_line=$(( (${{ matrix.runner }} - 1) * $chunk_size + 1 ))
+          end_line=$(( ${{ matrix.runner }} * $chunk_size ))
+          sed -n "${start_line},${end_line}p" unique.txt > my_chunk.txt
+
+      - name: Install dependencies
+        run: pip install requests geoip2
+
+      - name: Test and Filter
+        run: |
+          python3 test_configs_final.py my_chunk.txt result_${{ matrix.runner }}.txt ${{ env.THRESHOLD_MS }}
+
+      - name: Upload result chunk
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-chunk-${{ matrix.runner }}
+          path: result_${{ matrix.runner }}.txt
+
+  merge_and_push:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download all result chunks
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-chunk-*
+          path: chunks/
+          merge-multiple: true
+
+      - name: Merge and Final Deduplication
+        run: |
+          cat chunks/result_*.txt > merged.txt
+          # یک مرحله حذف تکراری نهایی برای اطمینان کامل
+          sort merged.txt | uniq > subscription.txt
+          echo "✅ Final subscription count: $(wc -l < subscription.txt)"
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add subscription.txt
+          if git diff --quiet && git diff --staged --quiet; then
+            echo "No changes"
+          else
+            git commit -m "Auto-update subscription"
+            git push origin main
+          fi
