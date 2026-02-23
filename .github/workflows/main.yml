@@ -15,34 +15,19 @@ jobs:
     outputs:
       matrix: ${{ steps.split.outputs.matrix }}
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Fetch Raw Configs
+      - uses: actions/checkout@v4
+      - name: Fetch
         run: |
           curl -L -o raw.txt "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt"
-
-      - name: Initial Clean
+          grep -v "^#" raw.txt | grep -v "^$" | sort | uniq > unique.txt
+      - id: split
         run: |
-          grep -v "^#" raw.txt | grep -v "^$" | sort | uniq > unique_raw.txt
-
-      - name: Split configs into chunks
-        id: split
-        run: |
-          total_lines=$(wc -l < unique_raw.txt)
-          chunk_size=$(( ($total_lines + $NUM_RUNNERS - 1) / $NUM_RUNNERS ))
-          matrix_json="{\"runner\":["
-          for i in $(seq 1 $NUM_RUNNERS); do
-            matrix_json+="\"$i\""
-            [ $i -lt $NUM_RUNNERS ] && matrix_json+=","
-          done
-          matrix_json+="]}"
-          echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
-          mkdir -p share
-          cp unique_raw.txt share/unique.txt
-
-      - name: Upload unique.txt
-        uses: actions/upload-artifact@v4
+          total=$(wc -l < unique.txt)
+          chunk=$(( ($total + 4 - 1) / 4 ))
+          res="{\"runner\":[\"1\",\"2\",\"3\",\"4\"]}"
+          echo "matrix=$res" >> $GITHUB_OUTPUT
+          mkdir -p share && cp unique.txt share/unique.txt
+      - uses: actions/upload-artifact@v4
         with:
           name: shared-unique
           path: share/
@@ -54,62 +39,45 @@ jobs:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Download unique.txt
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
           name: shared-unique
           path: ./
-
-      - name: Get my chunk
+      - name: Get chunk
         run: |
-          total_lines=$(wc -l < unique.txt)
-          chunk_size=$(( ($total_lines + $NUM_RUNNERS - 1) / $NUM_RUNNERS ))
-          start_line=$(( (${{ matrix.runner }} - 1) * $chunk_size + 1 ))
-          end_line=$(( ${{ matrix.runner }} * $chunk_size ))
-          sed -n "${start_line},${end_line}p" unique.txt > my_chunk.txt
-
-      - name: Install dependencies
+          total=$(wc -l < unique.txt)
+          chunk=$(( ($total + 4 - 1) / 4 ))
+          start=$(( (${{ matrix.runner }} - 1) * $chunk + 1 ))
+          end=$(( ${{ matrix.runner }} * $chunk ))
+          sed -n "${start},${end}p" unique.txt > my_chunk.txt
+      - name: Install deps
         run: pip install requests geoip2
-
-      - name: Test and Filter
+      - name: Run
         run: python3 test_configs_final.py my_chunk.txt result_${{ matrix.runner }}.txt ${{ env.THRESHOLD_MS }}
-
-      - name: Upload result chunk
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: result-chunk-${{ matrix.runner }}
           path: result_${{ matrix.runner }}.txt
 
-  merge_and_push:
+  merge:
     needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Download all result chunks
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
           pattern: result-chunk-*
           path: chunks/
           merge-multiple: true
-
-      - name: Merge and Final Cleanup
+      - name: Finalize
         run: |
-          if ls chunks/result_*.txt 1> /dev/null 2>&1; then
-            cat chunks/result_*.txt | sort | uniq > subscription.txt
-          else
-            touch subscription.txt
-          fi
-
-      - name: Commit and Push
+          cat chunks/result_*.txt | sort | uniq > subscription.txt
+      - name: Push
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions"
+          git config --global user.email "action@github.com"
           git add subscription.txt
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update subscription" && git push origin main)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update $(date)" && git push)
