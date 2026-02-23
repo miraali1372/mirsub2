@@ -1,4 +1,4 @@
-name: Real Test Sub
+name: Full Sub Update (Flagged)
 
 on:
   workflow_dispatch:
@@ -6,25 +6,31 @@ on:
     - cron: '0 */6 * * *'
 
 jobs:
-  run-test:
+  build-and-test:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # اجازه حیاتی برای Push کردن
+      contents: write
     steps:
       - uses: actions/checkout@v4
       
-      - name: Get Raw Configs
+      - name: Fetch All Configs
         run: |
           curl -L -o raw.txt "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt"
-          grep "^vless://" raw.txt | head -n 100 > unique.txt
+          grep "^vless://" raw.txt | sort | uniq > unique.txt
+          echo "Total unique configs to test: $(wc -l < unique.txt)"
 
-      - name: Run Python Diagnostic Test
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y unzip
+          pip install requests geoip2
+
+      - name: Run Full Diagnostic Speed Test
         run: python3 test_configs_final.py unique.txt subscription.txt
 
-      - name: Commit & Push Changes
+      - name: Commit and Push
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "mirsub-bot"
+          git config --global user.email "bot@mirsub.com"
           git add subscription.txt
-          git commit -m "Update working configs: $(date)" || exit 0
+          git commit -m "Update All Working Configs with Flags" || exit 0
           git push
