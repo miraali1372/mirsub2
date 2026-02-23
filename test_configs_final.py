@@ -9,7 +9,7 @@ import subprocess
 import geoip2.database
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# --- تنظیمات ---
+# --- Configs ---
 MAX_WORKERS_TCP = 50
 MAX_WORKERS_XRAY = 10
 XRAY_PATH = os.path.abspath("./xray")
@@ -54,19 +54,40 @@ def get_real_delay(vless_url, index):
     elif d['sec'] == "reality": stream["realitySettings"] = {"serverName": d['sni'], "fingerprint": d['fp'], "publicKey": d['pbk'], "shortId": d['sid']}
     if d['type'] == "ws": stream["wsSettings"] = {"path": d['path']}
 
-    cfg = {"log": {"loglevel": "none"}, "inbounds": [{"port": l_port, "protocol": "socks", "settings": {"udp": True}, "listen": "127.0.0.1"}],
-           "outbounds": [{"protocol": "vless", "settings": {"vnext": [{"address": d['addr'], "port": d['port'], "users": [{"id": d['uuid'], "encryption": "none"}]}]}, "streamSettings": stream}]}
+    # کانفیگ اصلاح شده با DNS و اجبار به IPv4
+    cfg = {
+        "log": {"loglevel": "none"},
+        "dns": {"servers": ["1.1.1.1", "8.8.8.8"]},
+        "inbounds": [{"port": l_port, "protocol": "socks", "settings": {"udp": True}, "listen": "127.0.0.1"}],
+        "outbounds": [
+            {
+                "protocol": "vless",
+                "settings": {"vnext": [{"address": d['addr'], "port": d['port'], "users": [{"id": d['uuid'], "encryption": "none"}]}]},
+                "streamSettings": stream,
+                "sendThrough": "0.0.0.0" # Force IPv4
+            }
+        ]
+    }
 
     proc = None
     try:
         with open(c_path, "w") as f: json.dump(cfg, f)
         proc = subprocess.Popen([XRAY_PATH, "-c", c_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(2)
+        time.sleep(2.5) # زمان کمی بیشتر برای اطمینان از بالا آمدن هسته
+        
         proxies = {"http": f"socks5://127.0.0.1:{l_port}", "https": f"socks5://127.0.0.1:{l_port}"}
         start = time.perf_counter()
-        r = requests.get("http://www.google.com/gen_204", proxies=proxies, timeout=5)
-        if r.status_code in [200, 204]:
-            return int((time.perf_counter() - start) * 1000)
+        
+        # تست اول: گوگل
+        try:
+            r = requests.get("http://www.google.com/gen_204", proxies=proxies, timeout=6)
+            if r.status_code in [200, 204]:
+                return int((time.perf_counter() - start) * 1000)
+        except:
+            # تست دوم (زاپاس): کلودفلر
+            r = requests.get("http://1.1.1.1", proxies=proxies, timeout=4)
+            if r.status_code == 200:
+                return int((time.perf_counter() - start) * 1000)
     except: pass
     finally:
         if proc:
@@ -98,9 +119,9 @@ def main():
         
         futs = [exe.submit(check_tcp, l) for l in lines]
         for f in as_completed(futs):
-            if f.result(): tcp_results.append(f.result())
+            res = f.result()
+            if res: tcp_results.append(res)
 
-    # مرتب‌سازی بر اساس پینگ TCP و انتخاب ۱۰۰ تای اول
     tcp_results.sort(key=lambda x: x[1])
     top_100 = [x[0] for x in tcp_results[:100]]
 
@@ -126,7 +147,7 @@ def main():
     with open(output_f, 'w') as f:
         f.write('\n'.join(results) + '\n')
     if reader: reader.close()
-    print(f"✅ Done. {len(results)} configs saved.")
+    print(f"✅ Final Result: {len(results)} working configs saved.")
 
 if __name__ == "__main__":
     main()
