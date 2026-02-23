@@ -12,7 +12,8 @@
 
 ### لینک خام (Raw):
 ```
-https://raw.githubusercontent.com/miraali1372/mirsub/main/subscription.txt
+https://raw.githubusercontent.com/miraali1372/mirsub2/main/subscription.txt
+
 ```
 
 ### در کلاینت‌های پروکسی:
