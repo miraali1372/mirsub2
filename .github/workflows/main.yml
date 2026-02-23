@@ -6,78 +6,35 @@ on:
   workflow_dispatch:
 
 env:
-  NUM_RUNNERS: 4
-  THRESHOLD_MS: 4000 # افزایش آستانه برای تست‌های واقعی سنگین
+  THRESHOLD_MS: 5000 
 
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.split.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Fetch
-        run: |
-          curl -L -o raw.txt "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt"
-          grep -v "^#" raw.txt | grep -v "^$" | sort | uniq > unique.txt
-      - id: split
-        run: |
-          echo "matrix={\"runner\":[\"1\",\"2\",\"3\",\"4\"]}" >> $GITHUB_OUTPUT
-          mkdir -p share && cp unique.txt share/unique.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: shared-unique
-          path: share/
-
-  test:
-    needs: prepare
-    runs-on: ubuntu-latest
-    strategy:
-      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
-      fail-fast: false
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: shared-unique
-          path: ./
-      - name: Get chunk
-        run: |
-          total=$(wc -l < unique.txt)
-          chunk=$(( ($total + 4 - 1) / 4 ))
-          start=$(( (${{ matrix.runner }} - 1) * $chunk + 1 ))
-          end=$(( ${{ matrix.runner }} * $chunk ))
-          sed -n "${start},${end}p" unique.txt > my_chunk.txt
-      - name: Install deps
-        run: |
-          sudo apt-get install unzip -y
-          pip install requests geoip2
-      - name: Run Real Test
-        run: python3 test_configs_final.py my_chunk.txt result_${{ matrix.runner }}.txt ${{ env.THRESHOLD_MS }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: result-chunk-${{ matrix.runner }}
-          path: result_${{ matrix.runner }}.txt
-
-  merge:
-    needs: test
+  test-and-update:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: result-chunk-*
-          path: chunks/
-          merge-multiple: true
-      - name: Finalize
+      
+      - name: Fetch configs
         run: |
-          cat chunks/result_*.txt | sort | uniq > subscription.txt
-      - name: Push
+          curl -L -o raw.txt "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt"
+          grep "^vless://" raw.txt | sort | uniq > unique.txt
+          echo "Total unique configs: $(wc -l < unique.txt)"
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip
+          pip install requests geoip2
+
+      - name: Run Test
+        run: python3 test_configs_final.py unique.txt subscription.txt ${{ env.THRESHOLD_MS }}
+
+      - name: Commit and Push
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "action@github.com"
           git add subscription.txt
-          git commit -m "Update: Flag + mirsub" || exit 0
+          git commit -m "Update working configs with flag" || exit 0
           git push
