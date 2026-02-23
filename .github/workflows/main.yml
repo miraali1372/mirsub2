@@ -7,7 +7,7 @@ on:
 
 env:
   NUM_RUNNERS: 4
-  THRESHOLD_MS: 2500 # آستانه بالاتر برای تست واقعی (میلی‌ثانیه)
+  THRESHOLD_MS: 3500 # آستانه بالا برای تست واقعی در اولین اجرا
 
 jobs:
   prepare:
@@ -16,14 +16,13 @@ jobs:
       matrix: ${{ steps.split.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch
+      - name: Fetch configs
         run: |
           curl -L -o raw.txt "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt"
           grep -v "^#" raw.txt | grep -v "^$" | sort | uniq > unique.txt
       - id: split
         run: |
-          res="{\"runner\":[\"1\",\"2\",\"3\",\"4\"]}"
-          echo "matrix=$res" >> $GITHUB_OUTPUT
+          echo "matrix={\"runner\":[\"1\",\"2\",\"3\",\"4\"]}" >> $GITHUB_OUTPUT
           mkdir -p share && cp unique.txt share/unique.txt
       - uses: actions/upload-artifact@v4
         with:
@@ -46,10 +45,10 @@ jobs:
         run: |
           total=$(wc -l < unique.txt)
           chunk=$(( ($total + 4 - 1) / 4 ))
-          start=$(( (${{ matrix.runner }} - 1) * $chunk + 1 ))
-          end=$(( ${{ matrix.runner }} * $chunk ))
-          sed -n "${start},${end}p" unique.txt > my_chunk.txt
-      - name: Install deps
+          start_line=$(( (${{ matrix.runner }} - 1) * $chunk + 1 ))
+          end_line=$(( ${{ matrix.runner }} * $chunk ))
+          sed -n "${start_line},${end_line}p" unique.txt > my_chunk.txt
+      - name: Install dependencies
         run: |
           sudo apt-get install unzip -y
           pip install requests geoip2
@@ -75,9 +74,9 @@ jobs:
       - name: Finalize
         run: |
           cat chunks/result_*.txt | sort | uniq > subscription.txt
-      - name: Push
+      - name: Push results
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "action@github.com"
           git add subscription.txt
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Real Test Update" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Real Delay Update" && git push)
