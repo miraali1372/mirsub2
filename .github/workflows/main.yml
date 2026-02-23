@@ -2,39 +2,35 @@ name: Update Subscription (Real Test)
 
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '0 */4 * * *' # هر ۴ ساعت یکبار برای فشار کمتر
   workflow_dispatch:
 
-env:
-  THRESHOLD_MS: 5000 
-
 jobs:
-  test-and-update:
+  update:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
       
-      - name: Fetch configs
+      - name: Fetch
         run: |
           curl -L -o raw.txt "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt"
           grep "^vless://" raw.txt | sort | uniq > unique.txt
-          echo "Total unique configs: $(wc -l < unique.txt)"
 
-      - name: Install Dependencies
+      - name: Setup
         run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip
+          sudo apt-get update && sudo apt-get install -y unzip
           pip install requests geoip2
 
-      - name: Run Test
-        run: python3 test_configs_final.py unique.txt subscription.txt ${{ env.THRESHOLD_MS }}
+      - name: Run Speed Test
+        run: python3 test_configs_final.py unique.txt subscription.txt 4000
 
-      - name: Commit and Push
+      - name: Deploy
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "action@github.com"
           git add subscription.txt
-          git commit -m "Update working configs with flag" || exit 0
+          git commit -m "Update: Flag + mirsub" || exit 0
           git push
