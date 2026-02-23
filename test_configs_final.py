@@ -9,46 +9,46 @@ import subprocess
 import geoip2.database
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# --- تنظیمات ---
-MAX_WORKERS_TCP = 50
-MAX_WORKERS_XRAY = 10
-XRAY_PATH = "./xray"
-GEO_DB_PATH = "geoip.mmdb"
+# --- تنظیمات سخت‌گیرانه برای جلوگیری از توقف ---
+MAX_WORKERS_TCP = 40
+MAX_WORKERS_XRAY = 6 # تعداد کم برای جلوگیری از کرش رانر
+XRAY_PATH = os.path.abspath("./xray")
+GEO_DB_PATH = os.path.abspath("geoip.mmdb")
 
 def get_flag(code):
     if not code or code == "mirsub": return "🚩"
-    return "".join(chr(ord(c) + 127397) for c in code.upper())
+    try:
+        return "".join(chr(ord(c) + 127397) for c in code.upper())
+    except: return "🚩"
 
 def setup_environment():
     if not os.path.exists(XRAY_PATH):
+        print("📥 Downloading Xray...")
         os.system("curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip")
         os.system("unzip -o xray.zip xray && rm xray.zip && chmod +x xray")
     
     if not os.path.exists(GEO_DB_PATH):
-        url = "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb"
-        r = requests.get(url, timeout=30)
-        with open(GEO_DB_PATH, "wb") as f: f.write(r.content)
+        print("🌍 Downloading GeoIP...")
+        try:
+            r = requests.get("https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb", timeout=20)
+            with open(GEO_DB_PATH, "wb") as f: f.write(r.content)
+        except: print("⚠️ GeoIP Download Failed")
 
 def parse_vless(url):
     try:
-        if not url.startswith("vless://"): return None
-        parts = url.split("://")[1].split("@")
-        uuid = parts[0]
-        rest = parts[1].split("?")
-        host_port = rest[0].split(":")
-        address = host_port[0]
-        port = int(host_port[1]) if len(host_port) > 1 else 443
-        
-        query = urllib.parse.parse_qs(rest[1]) if len(rest) > 1 else {}
-        def get_q(key): return query.get(key, [''])[0].split('#')[0]
-
+        u = urllib.parse.urlparse(url)
+        q = urllib.parse.parse_qs(u.query)
         return {
-            "uuid": uuid, "address": address, "port": port,
-            "security": get_q('security') or 'none',
-            "sni": get_q('sni') or address,
-            "type": get_q('type') or 'tcp',
-            "pbk": get_q('pbk'), "sid": get_q('sid'),
-            "path": get_q('path'), "fp": get_q('fp') or 'chrome'
+            "uuid": u.username,
+            "addr": u.hostname,
+            "port": u.port or 443,
+            "sni": q.get('sni', [u.hostname])[0],
+            "sec": q.get('security', ['none'])[0],
+            "type": q.get('type', ['tcp'])[0],
+            "pbk": q.get('pbk', [''])[0],
+            "sid": q.get('sid', [''])[0],
+            "path": q.get('path', [''])[0],
+            "fp": q.get('fp', ['chrome'])[0]
         }
     except: return None
 
@@ -57,58 +57,45 @@ def get_real_delay(vless_url, index):
     if not d: return None
     
     l_port = 20000 + (index % 1000)
-    conf_file = f"config_{l_port}.json"
+    c_path = os.path.abspath(f"c_{l_port}.json")
     
-    # ساخت دقيق Outbound برای Xray
-    stream_settings = {
-        "network": d['type'],
-        "security": d['security'],
-    }
-    
-    if d['security'] == "tls":
-        stream_settings["tlsSettings"] = {"serverName": d['sni'], "fingerprint": d['fp']}
-    elif d['security'] == "reality":
-        stream_settings["realitySettings"] = {
-            "serverName": d['sni'], "fingerprint": d['fp'],
-            "publicKey": d['pbk'], "shortId": d['sid']
-        }
-    
-    if d['type'] == "ws":
-        stream_settings["wsSettings"] = {"path": d['path']}
+    stream = {"network": d['type'], "security": d['sec']}
+    if d['sec'] == "tls": stream["tlsSettings"] = {"serverName": d['sni'], "fingerprint": d['fp']}
+    elif d['sec'] == "reality": stream["realitySettings"] = {"serverName": d['sni'], "fingerprint": d['fp'], "publicKey": d['pbk'], "shortId": d['sid']}
+    if d['type'] == "ws": stream["wsSettings"] = {"path": d['path']}
 
-    xray_config = {
+    cfg = {
         "log": {"loglevel": "none"},
         "inbounds": [{"port": l_port, "protocol": "socks", "settings": {"udp": True}, "listen": "127.0.0.1"}],
         "outbounds": [{
             "protocol": "vless",
-            "settings": {"vnext": [{"address": d['address'], "port": d['port'], "users": [{"id": d['uuid'], "encryption": "none"}]}]},
-            "streamSettings": stream_settings
+            "settings": {"vnext": [{"address": d['addr'], "port": d['port'], "users": [{"id": d['uuid'], "encryption": "none"}]}]},
+            "streamSettings": stream
         }]
     }
 
+    proc = None
     try:
-        with open(conf_file, "w") as f: json.dump(xray_config, f)
+        with open(c_path, "w") as f: json.dump(cfg, f)
+        proc = subprocess.Popen([XRAY_PATH, "-c", c_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
-        # اجرای Xray با آدرس مطلق
-        proc = subprocess.Popen([os.path.abspath(XRAY_PATH), "-c", os.path.abspath(conf_file)], 
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(3.5)
+        # زمان انتظار کوتاه برای شروع
+        time.sleep(2)
         
         proxies = {"http": f"socks5://127.0.0.1:{l_port}", "https": f"socks5://127.0.0.1:{l_port}"}
         start = time.perf_counter()
-        # تست با یک آدرس بسیار سبک
-        r = requests.get("http://www.google.com/gen_204", proxies=proxies, timeout=10)
-        delay = int((time.perf_counter() - start) * 1000)
-        
-        proc.terminate()
-        proc.wait()
-        os.remove(conf_file)
+        # تست با دامین معتبر
+        r = requests.get("http://www.google.com/gen_204", proxies=proxies, timeout=5)
         
         if r.status_code in [200, 204]:
-            return delay
-    except:
-        if 'proc' in locals(): proc.terminate()
-        if os.path.exists(conf_file): os.remove(conf_file)
+            return int((time.perf_counter() - start) * 1000)
+    except: pass
+    finally:
+        if proc:
+            proc.terminate()
+            try: proc.wait(timeout=2)
+            except: proc.kill()
+        if os.path.exists(c_path): os.remove(c_path)
     return None
 
 def main():
@@ -121,42 +108,46 @@ def main():
     except: pass
 
     with open(input_f, 'r') as f:
-        raw_lines = [l.strip() for l in f if l.startswith('vless://')]
+        lines = [l.strip() for l in f if l.startswith('vless://')]
 
-    print(f"🔍 Phase 1: TCP Check...")
+    print(f"🔍 Phase 1: Quick TCP Check on {len(lines)}...")
     alive = []
-    seen = set()
-    for l in raw_lines:
-        d = parse_vless(l)
-        if d and d['address'] not in seen:
+    seen_ips = set()
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS_TCP) as exe:
+        def check_tcp(l):
+            d = parse_vless(l)
+            if not d or d['addr'] in seen_ips: return None
             try:
-                with socket.create_connection((d['address'], d['port']), timeout=2):
-                    alive.append(l)
-                    seen.add(d['address'])
-            except: pass
+                with socket.create_connection((d['addr'], d['port']), timeout=2):
+                    seen_ips.add(d['addr'])
+                    return l
+            except: return None
+        
+        futs = [exe.submit(check_tcp, l) for l in lines]
+        for f in as_completed(futs):
+            res = f.result()
+            if res: alive.append(res)
 
-    print(f"🚀 Phase 2: Xray Real Test on {len(alive)} configs...")
+    print(f"🚀 Phase 2: Xray Real Test on {len(alive)}...")
     results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS_XRAY) as exe:
-        future_to_conf = {exe.submit(get_real_delay, c, i): c for i, c in enumerate(alive)}
-        for f in as_completed(future_to_conf):
+        f_to_c = {exe.submit(get_real_delay, c, i): c for i, c in enumerate(alive)}
+        for f in as_completed(f_to_c):
             delay = f.result()
             if delay and delay < threshold:
-                conf = future_to_conf[f]
-                d = parse_vless(conf)
+                c = f_to_c[f]
+                d = parse_vless(c)
                 try:
-                    ip = socket.gethostbyname(d['address'])
+                    ip = socket.gethostbyname(d['addr'])
                     cc = reader.country(ip).country.iso_code or "mirsub"
                 except: cc = "mirsub"
-                
-                flag = get_flag(cc)
-                results.append(f"{conf.split('#')[0]}#{flag} mirsub")
+                results.append(f"{c.split('#')[0]}#{get_flag(cc)} mirsub")
 
     with open(output_f, 'w') as f:
         f.write('\n'.join(results) + '\n')
     
     if reader: reader.close()
-    print(f"✅ Saved {len(results)} working configs.")
+    print(f"✅ Finished. {len(results)} saved.")
 
 if __name__ == "__main__":
     main()
