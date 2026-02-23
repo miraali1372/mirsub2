@@ -8,14 +8,12 @@ import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# تنظیمات
+# --- تنظیمات پایه ---
 XRAY_PATH = os.path.abspath("./xray")
-
-def get_flag(code):
-    return "🚩" # برای سادگی فعلاً پرچم ثابت می‌گذاریم تا خروجی بگیریم
 
 def setup():
     if not os.path.exists(XRAY_PATH):
+        print("📥 Downloading Xray Core...")
         os.system("curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip")
         os.system("unzip -o xray.zip xray && rm xray.zip && chmod +x xray")
 
@@ -34,9 +32,10 @@ def parse_vless(url):
 def test_vless(url, index):
     d = parse_vless(url)
     if not d: return None
-    l_port = 20000 + (index % 1000)
+    l_port = 20000 + (index % 500)
+    c_file = f"config_{l_port}.json"
     
-    # ساخت کانفیگ به صورت Inline
+    # ساخت فایل کانفیگ مینیمال
     cfg = {
         "log": {"loglevel": "none"},
         "inbounds": [{"port": l_port, "protocol": "socks", "settings": {"udp": True}, "listen": "127.0.0.1"}],
@@ -52,47 +51,51 @@ def test_vless(url, index):
         }]
     }
 
-    c_file = f"temp_{l_port}.json"
-    with open(c_file, 'w') as f: json.dump(cfg, f)
-    
-    proc = subprocess.Popen([XRAY_PATH, "-c", c_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(1.5)
-    
-    res = None
     try:
-        start = time.perf_counter()
-        # تست با یک آدرس مستقیم IP برای حذف مشکل DNS
-        r = requests.get("http://1.1.1.1", proxies={"http": f"socks5://127.0.0.1:{l_port}"}, timeout=5)
+        with open(c_file, 'w') as f: json.dump(cfg, f)
+        # اجرای Xray و صبر برای لود شدن
+        proc = subprocess.Popen([XRAY_PATH, "-c", c_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(2)
+        
+        # تست از طریق پروکسی ساکس
+        proxies = {"http": f"socks5://127.0.0.1:{l_port}", "https": f"socks5://127.0.0.1:{l_port}"}
+        # تست مستقیم IP برای حذف لایه DNS
+        r = requests.get("http://1.1.1.1", proxies=proxies, timeout=5)
+        
+        proc.terminate()
+        proc.wait()
+        if os.path.exists(c_file): os.remove(c_file)
+        
         if r.status_code == 200:
-            res = int((time.perf_counter() - start) * 1000)
-    except: pass
-    
-    proc.terminate()
-    if os.path.exists(c_file): os.remove(c_file)
-    return res
+            return url
+    except:
+        if 'proc' in locals(): proc.terminate()
+        if os.path.exists(c_file): os.remove(c_file)
+    return None
 
 def main():
     setup()
     input_f, output_f = sys.argv[1], sys.argv[2]
     
     with open(input_f, 'r') as f:
-        lines = list(set([l.strip() for l in f if l.startswith('vless://')]))[:150] # محدود به ۱۵۰ تا برای سرعت
+        # فقط ۵۰ تا از بهترین‌های اول رو فعلاً تست می‌کنیم برای اطمینان
+        lines = list(set([l.strip() for l in f if l.startswith('vless://')]))[:50]
 
-    print(f"🚀 Testing {len(lines)} configs...")
-    final = []
+    print(f"🚀 Testing {len(lines)} configs with direct Xray execution...")
+    valid_configs = []
     
-    with ThreadPoolExecutor(max_workers=10) as exe:
-        fut_to_url = {exe.submit(test_vless, url, i): url for i, url in enumerate(lines)}
-        for fut in as_completed(fut_to_url):
-            delay = fut.result()
-            if delay:
-                url = fut_to_url[fut]
-                # فرمت درخواستی شما
-                final.append(f"{url.split('#')[0]}#🚩 mirsub")
+    with ThreadPoolExecutor(max_workers=5) as exe:
+        futures = [exe.submit(test_vless, url, i) for i, url in enumerate(lines)]
+        for fut in as_completed(futures):
+            res = fut.result()
+            if res:
+                # فرمت دقیق درخواستی شما (بدون پرچم فعلاً برای تست خروجی)
+                valid_configs.append(f"{res.split('#')[0]}#🚩 mirsub")
 
     with open(output_f, 'w') as f:
-        f.write('\n'.join(final))
-    print(f"✅ Saved {len(final)} working configs.")
+        f.write('\n'.join(valid_configs))
+    
+    print(f"✅ Finished. {len(valid_configs)} configs saved.")
 
 if __name__ == "__main__":
     main()
