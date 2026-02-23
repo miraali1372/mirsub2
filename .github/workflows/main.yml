@@ -1,14 +1,14 @@
-name: Update Subscription (Real Test)
+name: Update Subscription (Top 100 TCP)
 
 on:
   schedule:
-    - cron: '0 */4 * * *' # هر ۴ ساعت یکبار برای فشار کمتر
+    - cron: '0 */4 * * *'
   workflow_dispatch:
 
 jobs:
-  update:
+  test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10 # زمان کل به ۱۰ دقیقه محدود شد
     permissions:
       contents: write
     steps:
@@ -19,7 +19,7 @@ jobs:
           curl -L -o raw.txt "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt"
           grep "^vless://" raw.txt | sort | uniq > unique.txt
 
-      - name: Setup
+      - name: Deps
         run: |
           sudo apt-get update && sudo apt-get install -y unzip
           pip install requests geoip2
@@ -27,10 +27,10 @@ jobs:
       - name: Run Speed Test
         run: python3 test_configs_final.py unique.txt subscription.txt 4000
 
-      - name: Deploy
+      - name: Push
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "action@github.com"
           git add subscription.txt
-          git commit -m "Update: Flag + mirsub" || exit 0
+          git commit -m "Update: Top 100 TCP with Flag" || exit 0
           git push
