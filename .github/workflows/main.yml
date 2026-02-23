@@ -7,7 +7,7 @@ on:
 
 env:
   NUM_RUNNERS: 4
-  THRESHOLD_MS: 150   # مقدار آستانه پینگ (قابل تغییر)
+  THRESHOLD_MS: 150
 
 jobs:
   prepare:
@@ -21,12 +21,10 @@ jobs:
       - name: Fetch Raw Configs
         run: |
           curl -L -o raw.txt "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt"
-          echo "✅ Total configs fetched: $(wc -l < raw.txt)"
 
       - name: Initial Clean
         run: |
           grep -v "^#" raw.txt | grep -v "^$" | sort | uniq > unique_raw.txt
-          echo "✅ Initial unique count: $(wc -l < unique_raw.txt)"
 
       - name: Split configs into chunks
         id: split
@@ -77,8 +75,7 @@ jobs:
         run: pip install requests geoip2
 
       - name: Test and Filter
-        run: |
-          python3 test_configs_final.py my_chunk.txt result_${{ matrix.runner }}.txt ${{ env.THRESHOLD_MS }}
+        run: python3 test_configs_final.py my_chunk.txt result_${{ matrix.runner }}.txt ${{ env.THRESHOLD_MS }}
 
       - name: Upload result chunk
         uses: actions/upload-artifact@v4
@@ -102,21 +99,17 @@ jobs:
           path: chunks/
           merge-multiple: true
 
-      - name: Merge and Final Deduplication
+      - name: Merge and Final Cleanup
         run: |
-          cat chunks/result_*.txt > merged.txt
-          # یک مرحله حذف تکراری نهایی برای اطمینان کامل
-          sort merged.txt | uniq > subscription.txt
-          echo "✅ Final subscription count: $(wc -l < subscription.txt)"
+          if ls chunks/result_*.txt 1> /dev/null 2>&1; then
+            cat chunks/result_*.txt | sort | uniq > subscription.txt
+          else
+            touch subscription.txt
+          fi
 
       - name: Commit and Push
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add subscription.txt
-          if git diff --quiet && git diff --staged --quiet; then
-            echo "No changes"
-          else
-            git commit -m "Auto-update subscription"
-            git push origin main
-          fi
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update subscription" && git push origin main)
