@@ -1,4 +1,4 @@
-name: Update Subscription
+name: Update Subscription (Real Test)
 
 on:
   schedule:
@@ -7,7 +7,7 @@ on:
 
 env:
   NUM_RUNNERS: 4
-  THRESHOLD_MS: 150
+  THRESHOLD_MS: 1000 # برای تست واقعی، آستانه را کمی بالاتر ببرید (مثلاً ۱۰۰۰)
 
 jobs:
   prepare:
@@ -22,8 +22,6 @@ jobs:
           grep -v "^#" raw.txt | grep -v "^$" | sort | uniq > unique.txt
       - id: split
         run: |
-          total=$(wc -l < unique.txt)
-          chunk=$(( ($total + 4 - 1) / 4 ))
           res="{\"runner\":[\"1\",\"2\",\"3\",\"4\"]}"
           echo "matrix=$res" >> $GITHUB_OUTPUT
           mkdir -p share && cp unique.txt share/unique.txt
@@ -52,8 +50,10 @@ jobs:
           end=$(( ${{ matrix.runner }} * $chunk ))
           sed -n "${start},${end}p" unique.txt > my_chunk.txt
       - name: Install deps
-        run: pip install requests geoip2
-      - name: Run
+        run: |
+          sudo apt-get install unzip -y
+          pip install requests geoip2
+      - name: Run Real Test
         run: python3 test_configs_final.py my_chunk.txt result_${{ matrix.runner }}.txt ${{ env.THRESHOLD_MS }}
       - uses: actions/upload-artifact@v4
         with:
@@ -80,4 +80,4 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "action@github.com"
           git add subscription.txt
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update $(date)" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Real Delay Update" && git push)
