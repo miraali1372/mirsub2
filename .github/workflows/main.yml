@@ -7,7 +7,7 @@ on:
 
 env:
   NUM_RUNNERS: 4
-  THRESHOLD_MS: 1000 # برای تست واقعی، آستانه را کمی بالاتر ببرید (مثلاً ۱۰۰۰)
+  THRESHOLD_MS: 2500 # آستانه بالاتر برای تست واقعی (میلی‌ثانیه)
 
 jobs:
   prepare:
@@ -80,4 +80,4 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "action@github.com"
           git add subscription.txt
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Real Delay Update" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Real Test Update" && git push)
