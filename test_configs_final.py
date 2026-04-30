@@ -100,7 +100,7 @@ def main():
     print(f"🚀 Testing {len(lines)} configs with 8 parallel workers...")
     valid = []
     # افزایش تعداد ورکرها به ۸ برای سرعت بالاتر
-    with ThreadPoolExecutor(max_workers=8) as exe:
+    with ThreadPoolExecutor(max_workers=60) as exe:
         futs = [exe.submit(test_vless, url, i, reader) for i, url in enumerate(lines)]
         for f in as_completed(futs):
             res = f.result()
