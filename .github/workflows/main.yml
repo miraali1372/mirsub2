@@ -15,8 +15,8 @@ jobs:
       
       - name: Fetch All Configs
         run: |
-          curl -L -o raw.txt "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt"
-          grep "^vless://" raw.txt | sort | uniq > unique.txt
+          curl -L -o raw.txt "https://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt"
+          cat raw.txt | sort | uniq > unique.txt
           echo "Total unique configs to test: $(wc -l < unique.txt)"
 
       - name: Install Dependencies
