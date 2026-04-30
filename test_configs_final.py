@@ -97,7 +97,7 @@ def main():
     with open(input_f, 'r') as f:
         lines = list(set([l.strip() for l in f if l.startswith('vless://')]))
 
-    print(f"🚀 Testing {len(lines)} configs with 8 parallel workers...")
+    print(f"🚀 Testing {len(lines)} configs with 60 parallel workers...")
     valid = []
     # افزایش تعداد ورکرها به ۸ برای سرعت بالاتر
     with ThreadPoolExecutor(max_workers=60) as exe:
