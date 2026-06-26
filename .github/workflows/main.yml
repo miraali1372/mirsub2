@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
   schedule:
-    # GitHub Actions uses UTC
+    # GitHub Actions cron uses UTC.
     - cron: "0 */6 * * *"
 
 concurrency:
@@ -14,20 +14,45 @@ concurrency:
 jobs:
   run-test-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     permissions:
       contents: write
 
+    env:
+      MAX_WORKERS: "24"
+      TEST_ATTEMPTS: "2"
+      STARTUP_TIMEOUT: "5"
+      CONNECT_TIMEOUT: "5"
+      READ_TIMEOUT: "8"
+      MAX_DELAY_MS: "10000"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Fetch and merge all config sources
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python dependencies
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "requests>=2.32,<3" "PyYAML>=6,<7"
 
+      - name: Fetch, extract, merge, and deduplicate sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf downloaded-sources
+          rm -f unique.txt
           mkdir -p downloaded-sources
 
           urls=(
@@ -49,144 +74,422 @@ jobs:
             "https://raw.githubusercontent.com/itsyebekhe/PSG/main/lite/subscriptions/meta/reality"
           )
 
-          pids=()
-
           download_source() {
             local index="$1"
             local url="$2"
             local output="downloaded-sources/source-${index}.txt"
-
-            echo "Downloading source $((index + 1))/${#urls[@]}:"
-            echo "$url"
 
             if curl \
               --fail \
               --silent \
               --show-error \
               --location \
-              --retry 3 \
+              --retry 4 \
               --retry-all-errors \
               --retry-delay 3 \
               --connect-timeout 20 \
               --max-time 180 \
+              --user-agent "mirsub-source-collector/2.0" \
               --output "$output" \
               "$url"; then
-
-              echo "Source $((index + 1)) downloaded successfully."
+              echo "✅ Source $((index + 1))/${#urls[@]} downloaded: $url"
             else
               echo "::warning::Failed to download source: $url"
               rm -f "$output"
             fi
           }
 
-          # Download all sources in parallel
+          pids=()
           for index in "${!urls[@]}"; do
             download_source "$index" "${urls[$index]}" &
             pids+=("$!")
           done
 
-          # Wait for every download to finish
           for pid in "${pids[@]}"; do
             wait "$pid" || true
           done
 
-          SUCCESSFUL_SOURCES="$(
-            find downloaded-sources \
-              -type f \
-              -size +0c |
-            wc -l
-          )"
+          successful_sources="$(find downloaded-sources -type f -size +0c | wc -l)"
+          echo "Successful sources: $successful_sources/${#urls[@]}"
 
-          echo "Successful sources: $SUCCESSFUL_SOURCES/${#urls[@]}"
-
-          if [ "$SUCCESSFUL_SOURCES" -eq 0 ]; then
-            echo "::error::None of the config sources could be downloaded."
+          if [ "$successful_sources" -eq 0 ]; then
+            echo "::error::None of the sources could be downloaded."
             exit 1
           fi
-
-          cat downloaded-sources/* > raw.txt
 
           python3 <<'PYTHON'
+          from __future__ import annotations
+
+          import base64
+          import binascii
+          import hashlib
+          import html
+          import json
           import re
+          import urllib.parse
           from pathlib import Path
+          from typing import Any, Iterator
 
-          raw_file = Path("raw.txt")
-          output_file = Path("unique.txt")
+          import yaml
 
-          content = raw_file.read_text(
-              encoding="utf-8",
-              errors="ignore",
-          ).replace("\r", "")
+          SOURCE_DIR = Path("downloaded-sources")
+          OUTPUT_FILE = Path("unique.txt")
 
-          supported_schemes = (
-              r"(?:"
-              r"vless|"
-              r"vmess|"
-              r"trojan|"
-              r"ss|"
-              r"ssr|"
-              r"hysteria|"
-              r"hysteria2|"
-              r"hy2|"
-              r"tuic|"
-              r"wireguard"
-              r")"
-          )
+          VLESS_PATTERN = re.compile(r"vless://[^\s\"'<>]+", re.IGNORECASE)
+          BASE64_PATTERN = re.compile(r"^[A-Za-z0-9+/=_-]+$")
+          TRAILING_PUNCTUATION = ",;.)]}>'\""
 
-          config_pattern = re.compile(
-              rf"{supported_schemes}://[^\s\"'<>]+",
-              re.IGNORECASE,
-          )
 
-          configs = set()
+          def decoded_base64(value: str) -> str | None:
+              compact = "".join(value.strip().split())
+              if not 80 <= len(compact) <= 20_000_000:
+                  return None
+              if not BASE64_PATTERN.fullmatch(compact):
+                  return None
 
-          for match in config_pattern.finditer(content):
-              config = match.group(0).strip()
+              padding = "=" * (-len(compact) % 4)
+              for altchars in (None, b"-_"):
+                  try:
+                      raw = base64.b64decode(
+                          compact + padding,
+                          altchars=altchars,
+                          validate=False,
+                      )
+                  except (ValueError, binascii.Error):
+                      continue
 
-              # Remove punctuation occasionally added by YAML, HTML or lists
-              config = config.rstrip(",;")
+                  if not raw:
+                      continue
 
-              if config:
-                  configs.add(config)
+                  text = raw.decode("utf-8", errors="ignore")
+                  printable = sum(char.isprintable() or char in "\r\n\t" for char in text)
+                  if text and printable / len(text) >= 0.75:
+                      return text
+              return None
 
-          sorted_configs = sorted(configs)
 
-          if not sorted_configs:
-              raise SystemExit(
-                  "No valid proxy configurations were extracted."
+          def expanded_texts(original: str) -> Iterator[str]:
+              queue: list[tuple[str, int]] = [(original, 0)]
+              seen: set[str] = set()
+
+              while queue:
+                  text, depth = queue.pop(0)
+                  digest = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+                  if digest in seen:
+                      continue
+                  seen.add(digest)
+
+                  normalized = html.unescape(text).replace("\\/", "/")
+                  yield normalized
+
+                  if depth >= 2:
+                      continue
+
+                  candidates = [normalized]
+                  candidates.extend(
+                      line.strip().strip("\"'")
+                      for line in normalized.splitlines()
+                      if line.strip()
+                  )
+
+                  for candidate in candidates:
+                      decoded = decoded_base64(candidate)
+                      if decoded:
+                          queue.append((decoded, depth + 1))
+
+
+          def canonical_key(url: str) -> tuple[Any, ...]:
+              parsed = urllib.parse.urlsplit(url)
+              if parsed.scheme.lower() != "vless":
+                  raise ValueError("not VLESS")
+
+              try:
+                  port = parsed.port
+              except ValueError as exc:
+                  raise ValueError("invalid port") from exc
+
+              if not parsed.username or not parsed.hostname or port is None:
+                  raise ValueError("missing UUID, host, or port")
+
+              query = tuple(
+                  sorted(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+              )
+              return (
+                  urllib.parse.unquote(parsed.username).lower(),
+                  parsed.hostname.lower(),
+                  port,
+                  query,
               )
 
-          output_file.write_text(
-              "\n".join(sorted_configs) + "\n",
-              encoding="utf-8",
-          )
 
-          print(f"Total extracted configs: {len(sorted_configs)}")
+          def clean_vless_url(candidate: str) -> str | None:
+              candidate = html.unescape(candidate).replace("\\/", "/")
+              candidate = candidate.strip().rstrip(TRAILING_PUNCTUATION)
+              candidate = candidate.split("#", 1)[0]
+
+              try:
+                  parsed = urllib.parse.urlsplit(candidate)
+                  if parsed.scheme.lower() != "vless":
+                      return None
+                  if not parsed.username or not parsed.hostname or parsed.port is None:
+                      return None
+              except ValueError:
+                  return None
+
+              return urllib.parse.urlunsplit(
+                  ("vless", parsed.netloc, parsed.path, parsed.query, "")
+              )
+
+
+          def iter_mihomo_proxies(value: Any) -> Iterator[dict[str, Any]]:
+              if isinstance(value, dict):
+                  if str(value.get("type", "")).lower() == "vless":
+                      yield value
+                  for child in value.values():
+                      yield from iter_mihomo_proxies(child)
+              elif isinstance(value, list):
+                  for child in value:
+                      yield from iter_mihomo_proxies(child)
+
+
+          def first_dict(mapping: dict[str, Any], *names: str) -> dict[str, Any]:
+              for name in names:
+                  value = mapping.get(name)
+                  if isinstance(value, dict):
+                      return value
+              return {}
+
+
+          def first_value(mapping: dict[str, Any], *names: str, default: Any = "") -> Any:
+              for name in names:
+                  if name in mapping and mapping[name] is not None:
+                      return mapping[name]
+              return default
+
+
+          def mihomo_to_vless(proxy: dict[str, Any]) -> str | None:
+              user_id = str(first_value(proxy, "uuid", "id")).strip()
+              server = str(first_value(proxy, "server", "address")).strip()
+
+              try:
+                  port = int(first_value(proxy, "port"))
+              except (TypeError, ValueError):
+                  return None
+
+              if not user_id or not server or not 1 <= port <= 65535:
+                  return None
+
+              network = str(first_value(proxy, "network", default="tcp")).lower().strip()
+              network_aliases = {
+                  "websocket": "ws",
+                  "splithttp": "xhttp",
+                  "raw": "tcp",
+                  "mkcp": "kcp",
+              }
+              network = network_aliases.get(network, network)
+
+              reality_opts = first_dict(proxy, "reality-opts", "reality_opts")
+              tls_enabled = bool(first_value(proxy, "tls", default=False))
+              security = "reality" if reality_opts else ("tls" if tls_enabled else "none")
+
+              query: dict[str, str] = {
+                  "encryption": str(first_value(proxy, "encryption", default="none")),
+                  "security": security,
+                  "type": network or "tcp",
+              }
+
+              flow = str(first_value(proxy, "flow")).strip()
+              if flow:
+                  query["flow"] = flow
+
+              sni = str(first_value(proxy, "servername", "server-name", "sni")).strip()
+              if sni:
+                  query["sni"] = sni
+
+              fingerprint = str(
+                  first_value(proxy, "client-fingerprint", "fingerprint", "fp")
+              ).strip()
+              if fingerprint:
+                  query["fp"] = fingerprint
+
+              alpn = first_value(proxy, "alpn", default="")
+              if isinstance(alpn, list):
+                  alpn = ",".join(str(item) for item in alpn if item)
+              if str(alpn).strip():
+                  query["alpn"] = str(alpn).strip()
+
+              if reality_opts:
+                  public_key = str(
+                      first_value(
+                          reality_opts,
+                          "public-key",
+                          "public_key",
+                          "publicKey",
+                          "password",
+                      )
+                  ).strip()
+                  short_id = str(
+                      first_value(reality_opts, "short-id", "short_id", "shortId")
+                  ).strip()
+                  if not public_key:
+                      return None
+                  query["pbk"] = public_key
+                  query["sid"] = short_id
+
+              ws_opts = first_dict(proxy, "ws-opts", "ws_opts")
+              if network == "ws":
+                  path = str(first_value(ws_opts, "path", default="/") or "/")
+                  headers = first_dict(ws_opts, "headers")
+                  host = str(first_value(headers, "Host", "host")).strip()
+                  query["path"] = path
+                  if host:
+                      query["host"] = host
+
+              grpc_opts = first_dict(proxy, "grpc-opts", "grpc_opts")
+              if network == "grpc":
+                  service_name = str(
+                      first_value(
+                          grpc_opts,
+                          "grpc-service-name",
+                          "service-name",
+                          "serviceName",
+                      )
+                  ).strip()
+                  authority = str(first_value(grpc_opts, "authority")).strip()
+                  if service_name:
+                      query["serviceName"] = service_name
+                  if authority:
+                      query["authority"] = authority
+
+              upgrade_opts = first_dict(
+                  proxy,
+                  "http-upgrade-opts",
+                  "httpupgrade-opts",
+                  "httpupgrade_opts",
+              )
+              if network == "httpupgrade":
+                  path = str(first_value(upgrade_opts, "path", default="/") or "/")
+                  host = str(first_value(upgrade_opts, "host")).strip()
+                  headers = first_dict(upgrade_opts, "headers")
+                  host = host or str(first_value(headers, "Host", "host")).strip()
+                  query["path"] = path
+                  if host:
+                      query["host"] = host
+
+              xhttp_opts = first_dict(
+                  proxy,
+                  "xhttp-opts",
+                  "xhttp_opts",
+                  "splithttp-opts",
+                  "splithttp_opts",
+              )
+              if network == "xhttp":
+                  path = str(first_value(xhttp_opts, "path", default="/") or "/")
+                  host = str(first_value(xhttp_opts, "host")).strip()
+                  mode = str(first_value(xhttp_opts, "mode", default="auto") or "auto")
+                  query["path"] = path
+                  query["mode"] = mode
+                  if host:
+                      query["host"] = host
+                  extra = first_value(xhttp_opts, "extra", default=None)
+                  if isinstance(extra, dict):
+                      query["extra"] = json.dumps(
+                          extra,
+                          ensure_ascii=False,
+                          separators=(",", ":"),
+                      )
+
+              host_for_url = server
+              if ":" in server and not server.startswith("["):
+                  host_for_url = f"[{server}]"
+
+              query_string = urllib.parse.urlencode(
+                  query,
+                  doseq=False,
+                  quote_via=urllib.parse.quote,
+                  safe="",
+              )
+              name = str(first_value(proxy, "name", default="mihomo")).strip()
+              fragment = urllib.parse.quote(name, safe="")
+              return (
+                  f"vless://{urllib.parse.quote(user_id, safe='')}@"
+                  f"{host_for_url}:{port}?{query_string}#{fragment}"
+              )
+
+
+          def extract_from_text(text: str) -> list[str]:
+              found: list[str] = []
+
+              for expanded in expanded_texts(text):
+                  for match in VLESS_PATTERN.finditer(expanded):
+                      cleaned = clean_vless_url(match.group(0))
+                      if cleaned:
+                          found.append(cleaned)
+
+                  stripped = expanded.lstrip()
+                  looks_structured = (
+                      stripped.startswith(("{", "[", "proxies:"))
+                      or re.search(r"(?m)^\s*proxies\s*:", expanded) is not None
+                  )
+                  if not looks_structured:
+                      continue
+
+                  try:
+                      structured = yaml.safe_load(expanded)
+                  except yaml.YAMLError:
+                      structured = None
+
+                  if structured is not None:
+                      for proxy in iter_mihomo_proxies(structured):
+                          converted = mihomo_to_vless(proxy)
+                          if converted:
+                              cleaned = clean_vless_url(converted)
+                              if cleaned:
+                                  found.append(cleaned)
+
+              return found
+
+
+          unique: dict[tuple[Any, ...], str] = {}
+          invalid_count = 0
+
+          source_files = sorted(SOURCE_DIR.glob("source-*.txt"))
+          for source_file in source_files:
+              text = source_file.read_text(encoding="utf-8", errors="ignore")
+              local_keys: set[tuple[Any, ...]] = set()
+
+              for url in extract_from_text(text):
+                  try:
+                      key = canonical_key(url)
+                  except ValueError:
+                      invalid_count += 1
+                      continue
+                  local_keys.add(key)
+                  unique.setdefault(key, url)
+
+              print(f"{source_file.name}: {len(local_keys)} unique VLESS configs")
+
+          if not unique:
+              raise SystemExit("No valid VLESS configs were extracted from any source.")
+
+          configs = sorted(unique.values())
+          OUTPUT_FILE.write_text("\n".join(configs) + "\n", encoding="utf-8")
+
+          print(f"Total unique VLESS configs: {len(configs)}")
+          print(f"Invalid extracted candidates skipped: {invalid_count}")
           PYTHON
 
-          echo "Total unique configs to test: $(wc -l < unique.txt)"
-
           if [ ! -s unique.txt ]; then
-            echo "::error::unique.txt is empty."
+            echo "::error::unique.txt is missing or empty."
             exit 1
           fi
 
-      - name: Install dependencies
+          echo "Total configs sent to tester: $(wc -l < unique.txt)"
+
+      - name: Run real HTTPS delay test through Xray
         shell: bash
         run: |
           set -euo pipefail
-
-          sudo apt-get update
-          sudo apt-get install -y unzip
-
-          python3 -m pip install --upgrade pip
-          python3 -m pip install requests geoip2
-
-      - name: Run SpeedTest
-        shell: bash
-        run: |
-          set -euo pipefail
-
           python3 test_configs_final.py unique.txt subscription.txt
 
       - name: Validate final output
@@ -199,6 +502,17 @@ jobs:
             exit 1
           fi
 
+          if grep -Ev '^vless://' subscription.txt | grep -q .; then
+            echo "::error::subscription.txt contains invalid non-VLESS lines."
+            exit 1
+          fi
+
+          duplicates="$(sed 's/#.*$//' subscription.txt | sort | uniq -d | wc -l)"
+          if [ "$duplicates" -ne 0 ]; then
+            echo "::error::Final output contains duplicate configs."
+            exit 1
+          fi
+
           echo "Final working configs: $(wc -l < subscription.txt)"
 
       - name: Commit and push results
@@ -207,17 +521,15 @@ jobs:
           set -euo pipefail
 
           git config user.name "github-actions[bot]"
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add subscription.txt
 
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "No real subscription changes to commit."
             exit 0
           fi
 
-          git commit \
-            -m "Update subscription $(date -u '+%Y-%m-%d %H:%M UTC')"
-
-          git push
+          git commit -m "Update subscription $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"
