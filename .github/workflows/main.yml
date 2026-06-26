@@ -1,36 +1,225 @@
+```yaml
 name: Global Sub Update
 
 on:
   workflow_dispatch:
+
   schedule:
-    - cron: '0 */6 * * *'
+    # GitHub Actions uses UTC
+    - cron: "0 */6 * * *"
+
+concurrency:
+  group: global-sub-update
+  cancel-in-progress: true
 
 jobs:
   run-test-and-push:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+
     permissions:
       contents: write
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Fetch All Configs
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch and merge all config sources
+        shell: bash
         run: |
-          curl -L -o raw.txt "https://raw.githubusercontent.com/miraali1372/mirsub/main/subscription.txt"
-          cat raw.txt | sort | uniq > unique.txt
+          set -uo pipefail
+
+          mkdir -p downloaded-sources
+
+          urls=(
+            "https://raw.githubusercontent.com/miraali1372/mirsub/main/subscription.txt"
+            "https://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt"
+            "https://raw.githubusercontent.com/mohamadfg-dev/telegram-v2ray-configs-collector/refs/heads/main/category/vless.txt"
+            "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt"
+            "https://raw.githubusercontent.com/V2RayRoot/V2RayConfig/refs/heads/main/Config/vless.txt"
+            "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/filtered/subs/vless.txt"
+            "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt"
+            "https://raw.githubusercontent.com/F0rc3Run/F0rc3Run/main/splitted-by-protocol/vless.txt"
+            "https://raw.githubusercontent.com/arshiacomplus/v2rayExtractor/refs/heads/main/vless.html"
+            "https://raw.githubusercontent.com/SoliSpirit/v2ray-configs/refs/heads/main/Protocols/vless.txt"
+            "https://raw.githubusercontent.com/hamedcode/port-based-v2ray-configs/main/sub/vless.txt"
+            "https://raw.githubusercontent.com/10ium/ScrapeAndCategorize/refs/heads/main/output_configs/Vless.txt"
+            "https://raw.githubusercontent.com/10ium/MihomoSaz/main/Sublist/arshiacomplus/v2rayExtractor_vless.yaml"
+            "https://raw.githubusercontent.com/Mosifree/-FREE2CONFIG/refs/heads/main/Reality"
+            "https://raw.githubusercontent.com/10ium/V2Hub3/refs/heads/main/Split/Normal/reality"
+            "https://raw.githubusercontent.com/itsyebekhe/PSG/main/lite/subscriptions/meta/reality"
+          )
+
+          pids=()
+
+          download_source() {
+            local index="$1"
+            local url="$2"
+            local output="downloaded-sources/source-${index}.txt"
+
+            echo "Downloading source $((index + 1))/${#urls[@]}:"
+            echo "$url"
+
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              --location \
+              --retry 3 \
+              --retry-all-errors \
+              --retry-delay 3 \
+              --connect-timeout 20 \
+              --max-time 180 \
+              --output "$output" \
+              "$url"; then
+
+              echo "Source $((index + 1)) downloaded successfully."
+            else
+              echo "::warning::Failed to download source: $url"
+              rm -f "$output"
+            fi
+          }
+
+          # Download all sources in parallel
+          for index in "${!urls[@]}"; do
+            download_source "$index" "${urls[$index]}" &
+            pids+=("$!")
+          done
+
+          # Wait for every download to finish
+          for pid in "${pids[@]}"; do
+            wait "$pid" || true
+          done
+
+          SUCCESSFUL_SOURCES="$(
+            find downloaded-sources \
+              -type f \
+              -size +0c |
+            wc -l
+          )"
+
+          echo "Successful sources: $SUCCESSFUL_SOURCES/${#urls[@]}"
+
+          if [ "$SUCCESSFUL_SOURCES" -eq 0 ]; then
+            echo "::error::None of the config sources could be downloaded."
+            exit 1
+          fi
+
+          cat downloaded-sources/* > raw.txt
+
+          python3 <<'PYTHON'
+          import re
+          from pathlib import Path
+
+          raw_file = Path("raw.txt")
+          output_file = Path("unique.txt")
+
+          content = raw_file.read_text(
+              encoding="utf-8",
+              errors="ignore",
+          ).replace("\r", "")
+
+          supported_schemes = (
+              r"(?:"
+              r"vless|"
+              r"vmess|"
+              r"trojan|"
+              r"ss|"
+              r"ssr|"
+              r"hysteria|"
+              r"hysteria2|"
+              r"hy2|"
+              r"tuic|"
+              r"wireguard"
+              r")"
+          )
+
+          config_pattern = re.compile(
+              rf"{supported_schemes}://[^\s\"'<>]+",
+              re.IGNORECASE,
+          )
+
+          configs = set()
+
+          for match in config_pattern.finditer(content):
+              config = match.group(0).strip()
+
+              # Remove punctuation occasionally added by YAML, HTML or lists
+              config = config.rstrip(",;")
+
+              if config:
+                  configs.add(config)
+
+          sorted_configs = sorted(configs)
+
+          if not sorted_configs:
+              raise SystemExit(
+                  "No valid proxy configurations were extracted."
+              )
+
+          output_file.write_text(
+              "\n".join(sorted_configs) + "\n",
+              encoding="utf-8",
+          )
+
+          print(f"Total extracted configs: {len(sorted_configs)}")
+          PYTHON
+
           echo "Total unique configs to test: $(wc -l < unique.txt)"
 
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update && sudo apt-get install -y unzip
-          pip install requests geoip2
+          if [ ! -s unique.txt ]; then
+            echo "::error::unique.txt is empty."
+            exit 1
+          fi
 
-      - name: Run SpeedTest (Parallel Mode)
-        run: python3 test_configs_final.py unique.txt subscription.txt
-
-      - name: Commit and Push Results
+      - name: Install dependencies
+        shell: bash
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y unzip
+
+          python3 -m pip install --upgrade pip
+          python3 -m pip install requests geoip2
+
+      - name: Run SpeedTest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 test_configs_final.py unique.txt subscription.txt
+
+      - name: Validate final output
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -s subscription.txt ]; then
+            echo "::error::subscription.txt is missing or empty."
+            exit 1
+          fi
+
+          echo "Final working configs: $(wc -l < subscription.txt)"
+
+      - name: Commit and push results
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add subscription.txt
-          git commit -m "Update: $(date)" || exit 0
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit \
+            -m "Update subscription $(date -u '+%Y-%m-%d %H:%M UTC')"
+
           git push
+```
