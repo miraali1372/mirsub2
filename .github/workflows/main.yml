@@ -1,4 +1,3 @@
-```yaml
 name: Global Sub Update
 
 on:
@@ -222,4 +221,3 @@ jobs:
             -m "Update subscription $(date -u '+%Y-%m-%d %H:%M UTC')"
 
           git push
-```
